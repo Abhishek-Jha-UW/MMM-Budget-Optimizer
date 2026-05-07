@@ -231,6 +231,11 @@ with st.sidebar:
 
 df: Optional[pd.DataFrame] = st.session_state.get("df")
 
+def _default_channels_from_df(df: pd.DataFrame) -> List[str]:
+    cols = infer_spend_columns(df)
+    return [c.replace("spend_", "", 1) for c in cols]
+
+
 if page == "1) Data":
     st.subheader("Load data")
     st.caption(_data_requirements_help())
@@ -278,12 +283,6 @@ if page == "1) Data":
 
         spend_cols = infer_spend_columns(df)
         st.caption(f"Detected spend columns: {', '.join(spend_cols) if spend_cols else '(none)'}")
-
-
-def _default_channels_from_df(df: pd.DataFrame) -> List[str]:
-    cols = infer_spend_columns(df)
-    return [c.replace("spend_", "", 1) for c in cols]
-
 
 elif page == "2) Model + Insights":
     st.subheader("Fit MMM and review contributions")
