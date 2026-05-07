@@ -226,8 +226,20 @@ with st.sidebar:
     seasonality_K = st.slider("Seasonality terms (K)", 1, 5, 2, 1)
 
     st.markdown("---")
-    st.markdown("**Navigation**")
-    page = st.radio("Go to", options=["1) Data", "2) Model + Insights", "3) Budget Optimizer"], index=0)
+    st.markdown("**Quick steps**")
+    st.caption("1) Load data → 2) Fit model → 3) Optimize budget")
+
+# Business context must live OUTSIDE tabs: Streamlit may not run inactive tab blocks on a rerun,
+# which would leave `business_context` undefined when other tabs reference it.
+if "business_context" not in st.session_state:
+    st.session_state["business_context"] = ""
+st.text_area(
+    "Business context (optional, for AI setup)",
+    placeholder="Example: DTC skincare brand in the US. Channels: paid search, paid social, influencer, email. KPI: weekly revenue.",
+    height=90,
+    key="business_context",
+    help="Used only if you click “AI: propose channels + controls”.",
+)
 
 df: Optional[pd.DataFrame] = st.session_state.get("df")
 
@@ -235,8 +247,9 @@ def _default_channels_from_df(df: pd.DataFrame) -> List[str]:
     cols = infer_spend_columns(df)
     return [c.replace("spend_", "", 1) for c in cols]
 
+tab_data, tab_model, tab_opt = st.tabs(["1) Data", "2) Model + Insights", "3) Budget Optimizer"])
 
-if page == "1) Data":
+with tab_data:
     st.subheader("Load data")
     st.caption(_data_requirements_help())
 
@@ -255,13 +268,7 @@ if page == "1) Data":
         if st.button("Load sample dataset", type="primary"):
             st.session_state["df"] = generate_synthetic_mmm_data(n_weeks=104)
             st.session_state["df_source"] = "sample"
-            st.success("Sample dataset loaded. Go to “2) Model + Insights” in the left navigation.")
-
-    business_context = st.text_area(
-        "Business context (optional)",
-        placeholder="Example: DTC skincare brand in the US. Channels: paid search, paid social, influencer, email. KPI: weekly revenue.",
-        height=110,
-    )
+            st.success("Sample dataset loaded. Next: click the “2) Model + Insights” tab above.")
 
     if upload is not None:
         try:
@@ -278,25 +285,27 @@ if page == "1) Data":
     df = st.session_state.get("df")
 
     if df is not None:
-        st.success(f"Loaded {len(df):,} rows and {df.shape[1]:,} columns. Next: use the left navigation → “2) Model + Insights”.")
+        st.success(f"Loaded {len(df):,} rows and {df.shape[1]:,} columns. Next: click “2) Model + Insights” above.")
         st.dataframe(df.head(30), use_container_width=True)
 
         spend_cols = infer_spend_columns(df)
         st.caption(f"Detected spend columns: {', '.join(spend_cols) if spend_cols else '(none)'}")
 
-elif page == "2) Model + Insights":
+with tab_model:
     st.subheader("Fit MMM and review contributions")
 
     if df is None:
-        st.info("First load data in “1) Data”.")
+        st.info("First load data in the “1) Data” tab.")
         st.stop()
 
     if "date" not in df.columns or "kpi" not in df.columns:
         st.error("Your data must include a date column and a KPI column. Go to “1) Data” and map columns.")
         st.stop()
 
-    # AI-assisted setup (optional; demo-friendly)
-    if use_ai and business_context.strip():
+    # AI-assisted setup (optional; demo-friendly) — read from session only so this tab never
+    # depends on a local variable that might not exist if widget code is reorganized.
+    ai_business_context = str(st.session_state.get("business_context", "") or "").strip()
+    if use_ai and ai_business_context:
         c_ai1, c_ai2 = st.columns([1, 1])
         with c_ai1:
             run_ai_setup = st.button("AI: propose channels + controls", type="primary")
@@ -310,7 +319,11 @@ elif page == "2) Model + Insights":
             else:
                 with st.spinner("Generating setup…"):
                     try:
-                        plan = propose_setup_with_ai(api_key=key, model_name=model_name, business_context=business_context)
+                        plan = propose_setup_with_ai(
+                            api_key=key,
+                            model_name=model_name,
+                            business_context=ai_business_context,
+                        )
                         st.session_state["ai_plan"] = plan.model_dump()
                     except Exception as e:
                         st.error(f"AI setup failed: {e}")
@@ -446,7 +459,7 @@ elif page == "2) Model + Insights":
 
                 if st.session_state.get("ai_summary_text"):
                     st.markdown(st.session_state["ai_summary_text"])
-                    st.caption("Next: use the left navigation → “3) Budget Optimizer”.")
+                    st.caption("Next: click the “3) Budget Optimizer” tab above.")
                 else:
                     if st.button("Generate executive summary"):
                         with st.spinner("Generating executive summary…"):
@@ -461,14 +474,13 @@ elif page == "2) Model + Insights":
                         if st.session_state.get("ai_summary_text"):
                             st.markdown(st.session_state["ai_summary_text"])
 
-
-elif page == "3) Budget Optimizer":
+with tab_opt:
     st.subheader("Budget optimizer (next period)")
 
     fit = st.session_state.get("fit")
     contrib = st.session_state.get("contrib")
     if fit is None or contrib is None or df is None:
-        st.info("First fit a model in “2) Model + Insights”.")
+        st.info("First fit a model in the “2) Model + Insights” tab.")
         st.stop()
 
     channels = [c.name for c in fit.channels]
