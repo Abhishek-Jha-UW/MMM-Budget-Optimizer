@@ -87,6 +87,31 @@ JSON schema:
     payload = json.loads(text)
     return AiPlan.model_validate(payload)
 
+def executive_summary_with_ai(*, api_key: str, model_name: str, payload: Dict[str, Any]) -> str:
+    """
+    Writes an executive summary from computed outputs only.
+    """
+    client = _openai_client(api_key=api_key)
+    system = (
+        "You are a marketing mix modeling (MMM) analyst.\n"
+        "Write a concise executive summary for a non-technical stakeholder.\n"
+        "Use ONLY the provided JSON payload. Do not invent numbers or channels.\n"
+        "Include: key drivers, what to do next, and 2-3 caveats.\n"
+    )
+    user = "Here are the computed MMM outputs (JSON):\n\n" + json.dumps(payload, indent=2)
+    resp = client.responses.create(
+        model=model_name,
+        input=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        temperature=0.4,
+    )
+    text = getattr(resp, "output_text", None)
+    if not text:
+        raise RuntimeError("Empty response while generating executive summary.")
+    return text.strip()
+
 
 def _data_requirements_help() -> str:
     return (
@@ -109,8 +134,9 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Optional AI features**")
     st.caption("Uses `OPENAI_API_KEY` from Streamlit secrets / env vars.")
-    use_ai = st.toggle("Enable AI-assisted setup", value=False)
-    model_name = st.text_input("OpenAI model", value=DEFAULT_OPENAI_MODEL, help="Use the cheapest model you prefer.")
+    use_ai = st.toggle("Enable AI features", value=True)
+    model_name = DEFAULT_OPENAI_MODEL
+    auto_ai_summary = st.toggle("Auto-generate executive summary", value=True)
 
     st.markdown("---")
     st.markdown("**Model settings**")
@@ -170,12 +196,18 @@ with tab_model:
         st.error("Your data must include 'date' and 'kpi' columns.")
         st.stop()
 
-    # AI-assisted setup (optional)
+    # AI-assisted setup (optional; demo-friendly)
     if use_ai and business_context.strip():
-        if st.button("AI: propose channels + controls", type="primary"):
+        c_ai1, c_ai2 = st.columns([1, 1])
+        with c_ai1:
+            run_ai_setup = st.button("AI: propose channels + controls", type="primary")
+        with c_ai2:
+            st.caption("Uses your `OPENAI_API_KEY` from Streamlit secrets / env vars.")
+
+        if run_ai_setup:
             key = _get_api_key()
             if not key:
-                st.error("Missing OPENAI_API_KEY. Add it as a Streamlit secret or environment variable.")
+                st.error("Missing OPENAI_API_KEY. Add it as a Streamlit secret (recommended) or env var.")
             else:
                 with st.spinner("Generating setup…"):
                     try:
@@ -279,6 +311,55 @@ with tab_model:
             file_name="mmm_contributions.csv",
             mime="text/csv",
         )
+
+        st.markdown("---")
+        st.subheader("AI executive summary")
+        if not use_ai:
+            st.info("Enable AI features in the sidebar to generate an executive summary.")
+        else:
+            key = _get_api_key()
+            if not key:
+                st.info("Add `OPENAI_API_KEY` in Streamlit secrets to enable the executive summary.")
+            else:
+                summary_payload: Dict[str, Any] = {
+                    "app": "MMM Budget Optimizer",
+                    "diagnostics": fit.diagnostics,
+                    "channels": [c.model_dump() for c in fit.channels],
+                    "channel_contribution_totals": channel_summary(contrib, fit.channels).to_dict(orient="records"),
+                    "notes": (ai_plan.get("notes") if isinstance(ai_plan, dict) else "") or "",
+                }
+
+                cache_key = json.dumps(summary_payload, sort_keys=True)
+                if st.session_state.get("ai_summary_cache_key") != cache_key:
+                    st.session_state["ai_summary_cache_key"] = cache_key
+                    st.session_state["ai_summary_text"] = None
+
+                if auto_ai_summary and not st.session_state.get("ai_summary_text"):
+                    with st.spinner("Generating executive summary…"):
+                        try:
+                            st.session_state["ai_summary_text"] = executive_summary_with_ai(
+                                api_key=key,
+                                model_name=model_name,
+                                payload=summary_payload,
+                            )
+                        except Exception as e:
+                            st.error(f"Executive summary failed: {e}")
+
+                if st.session_state.get("ai_summary_text"):
+                    st.markdown(st.session_state["ai_summary_text"])
+                else:
+                    if st.button("Generate executive summary"):
+                        with st.spinner("Generating executive summary…"):
+                            try:
+                                st.session_state["ai_summary_text"] = executive_summary_with_ai(
+                                    api_key=key,
+                                    model_name=model_name,
+                                    payload=summary_payload,
+                                )
+                            except Exception as e:
+                                st.error(f"Executive summary failed: {e}")
+                        if st.session_state.get("ai_summary_text"):
+                            st.markdown(st.session_state["ai_summary_text"])
 
 
 with tab_opt:
