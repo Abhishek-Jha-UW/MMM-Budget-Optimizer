@@ -115,12 +115,92 @@ def executive_summary_with_ai(*, api_key: str, model_name: str, payload: Dict[st
 
 def _data_requirements_help() -> str:
     return (
-        "Upload a weekly CSV with columns:\n"
+        "Upload a weekly CSV/XLSX with columns:\n"
         "- date (weekly)\n"
         "- kpi (numeric)\n"
         "- spend_<channel> columns, e.g. spend_search, spend_social\n"
         "- optional control columns: promo_flag, price_index, etc.\n"
     )
+
+def _template_df() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-05", periods=8, freq="W-SUN").strftime("%Y-%m-%d"),
+            "kpi": [1200, 1250, 1230, 1300, 1290, 1335, 1380, 1360],
+            "spend_search": [1200, 1400, 1350, 1500, 1600, 1550, 1700, 1650],
+            "spend_social": [900, 950, 1000, 1100, 1050, 1150, 1200, 1180],
+            "spend_display": [400, 420, 410, 450, 460, 455, 480, 470],
+            "spend_email": [120, 130, 125, 140, 150, 145, 160, 155],
+            "promo_flag": [0, 0, 1, 0, 0, 1, 0, 0],
+            "price_index": [1.00, 1.00, 1.01, 1.01, 1.01, 1.02, 1.02, 1.02],
+        }
+    )
+
+
+def _load_uploaded(upload) -> pd.DataFrame:
+    name = (getattr(upload, "name", "") or "").lower()
+    if name.endswith(".xlsx") or name.endswith(".xls"):
+        return pd.read_excel(upload)
+    return pd.read_csv(upload)
+
+
+def _standardize_uploaded_df(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+    """
+    Makes uploads more forgiving:
+    - lets user map date/kpi columns if names differ
+    - lets user choose spend columns if they don't have spend_ prefix
+    Returns (df_standardized, warnings)
+    """
+    warnings: List[str] = []
+    df = df.copy()
+
+    cols = list(df.columns)
+    if len(cols) == 0:
+        raise ValueError("Uploaded file has no columns.")
+
+    # Map date + KPI
+    date_col = "date" if "date" in df.columns else None
+    kpi_col = "kpi" if "kpi" in df.columns else None
+
+    with st.expander("Fix column mapping (if needed)", expanded=("date" not in df.columns or "kpi" not in df.columns)):
+        if date_col is None:
+            date_col = st.selectbox("Select your date column", options=cols, index=0)
+            warnings.append("Mapped your date column to 'date'.")
+        if kpi_col is None:
+            kpi_col = st.selectbox(
+                "Select your KPI column (target)",
+                options=[c for c in cols if c != date_col],
+                index=0,
+            )
+            warnings.append("Mapped your KPI column to 'kpi'.")
+
+        spend_cols = [c for c in df.columns if str(c).startswith("spend_")]
+        if not spend_cols:
+            candidates = [c for c in cols if c not in {date_col, kpi_col}]
+            spend_pick = st.multiselect(
+                "Select spend columns (will be renamed to spend_<name>)",
+                options=candidates,
+                default=[c for c in candidates if "spend" in str(c).lower()][:4],
+                help="Pick the media spend columns. Controls can be added later in the Model tab.",
+            )
+            if spend_pick:
+                for c in spend_pick:
+                    safe = str(c).strip().lower().replace(" ", "_")
+                    if safe.startswith("spend_"):
+                        new = safe
+                    else:
+                        new = f"spend_{safe}"
+                    if new in df.columns and new != c:
+                        new = f"{new}_col"
+                    df = df.rename(columns={c: new})
+                warnings.append("Renamed selected spend columns to the spend_<channel> format.")
+
+    if date_col and date_col != "date":
+        df = df.rename(columns={date_col: "date"})
+    if kpi_col and kpi_col != "kpi":
+        df = df.rename(columns={kpi_col: "kpi"})
+
+    return df, warnings
 
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
@@ -145,20 +225,32 @@ with st.sidebar:
     add_seasonality = st.toggle("Include seasonality (Fourier)", value=True)
     seasonality_K = st.slider("Seasonality terms (K)", 1, 5, 2, 1)
 
+    st.markdown("---")
+    st.markdown("**Navigation**")
+    page = st.radio("Go to", options=["1) Data", "2) Model + Insights", "3) Budget Optimizer"], index=0)
 
-tab_data, tab_model, tab_opt = st.tabs(["1) Data", "2) Model + Insights", "3) Budget Optimizer"])
+df: Optional[pd.DataFrame] = st.session_state.get("df")
 
-
-with tab_data:
+if page == "1) Data":
     st.subheader("Load data")
     st.caption(_data_requirements_help())
 
-    upload = st.file_uploader("Upload CSV", type=["csv"])
-    demo_col1, demo_col2 = st.columns([1, 1])
-    with demo_col1:
-        use_demo = st.checkbox("Use synthetic demo data", value=upload is None)
-    with demo_col2:
-        n_weeks = st.slider("Demo weeks", 52, 156, 104, 4, disabled=not use_demo)
+    st.download_button(
+        "Download data template (CSV)",
+        data=_template_df().to_csv(index=False).encode("utf-8"),
+        file_name="mmm_template.csv",
+        mime="text/csv",
+        help="Download this template, paste your weekly data, then upload it back here.",
+    )
+
+    top1, top2 = st.columns([1, 1])
+    with top1:
+        upload = st.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
+    with top2:
+        if st.button("Load sample dataset", type="primary"):
+            st.session_state["df"] = generate_synthetic_mmm_data(n_weeks=104)
+            st.session_state["df_source"] = "sample"
+            st.success("Sample dataset loaded. Go to “2) Model + Insights” in the left navigation.")
 
     business_context = st.text_area(
         "Business context (optional)",
@@ -166,14 +258,22 @@ with tab_data:
         height=110,
     )
 
-    df: Optional[pd.DataFrame] = None
-    if upload is not None and not use_demo:
-        df = pd.read_csv(upload)
-    elif use_demo:
-        df = generate_synthetic_mmm_data(n_weeks=int(n_weeks))
+    if upload is not None:
+        try:
+            raw = _load_uploaded(upload)
+            df, warns = _standardize_uploaded_df(raw)
+            st.session_state["df"] = df
+            st.session_state["df_source"] = "upload"
+            for w in warns:
+                st.info(w)
+        except Exception as e:
+            st.error(f"Could not load this file: {e}")
+            st.stop()
+
+    df = st.session_state.get("df")
 
     if df is not None:
-        st.success(f"Loaded {len(df):,} rows and {df.shape[1]:,} columns.")
+        st.success(f"Loaded {len(df):,} rows and {df.shape[1]:,} columns. Next: use the left navigation → “2) Model + Insights”.")
         st.dataframe(df.head(30), use_container_width=True)
 
         spend_cols = infer_spend_columns(df)
@@ -185,15 +285,15 @@ def _default_channels_from_df(df: pd.DataFrame) -> List[str]:
     return [c.replace("spend_", "", 1) for c in cols]
 
 
-with tab_model:
+elif page == "2) Model + Insights":
     st.subheader("Fit MMM and review contributions")
 
     if df is None:
-        st.info("Load a dataset in the Data tab to continue.")
+        st.info("First load data in “1) Data”.")
         st.stop()
 
     if "date" not in df.columns or "kpi" not in df.columns:
-        st.error("Your data must include 'date' and 'kpi' columns.")
+        st.error("Your data must include a date column and a KPI column. Go to “1) Data” and map columns.")
         st.stop()
 
     # AI-assisted setup (optional; demo-friendly)
@@ -347,6 +447,7 @@ with tab_model:
 
                 if st.session_state.get("ai_summary_text"):
                     st.markdown(st.session_state["ai_summary_text"])
+                    st.caption("Next: use the left navigation → “3) Budget Optimizer”.")
                 else:
                     if st.button("Generate executive summary"):
                         with st.spinner("Generating executive summary…"):
@@ -362,13 +463,13 @@ with tab_model:
                             st.markdown(st.session_state["ai_summary_text"])
 
 
-with tab_opt:
+elif page == "3) Budget Optimizer":
     st.subheader("Budget optimizer (next period)")
 
     fit = st.session_state.get("fit")
     contrib = st.session_state.get("contrib")
     if fit is None or contrib is None or df is None:
-        st.info("Fit a model first in the Model + Insights tab.")
+        st.info("First fit a model in “2) Model + Insights”.")
         st.stop()
 
     channels = [c.name for c in fit.channels]

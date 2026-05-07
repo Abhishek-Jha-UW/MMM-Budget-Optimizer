@@ -4,3 +4,4 @@ pandas
 scikit-learn
 openai
 pydantic
+openpyxl
